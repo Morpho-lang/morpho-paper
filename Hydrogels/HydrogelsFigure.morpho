@@ -1,0 +1,104 @@
+// This code runs the experiments needed to make the panels appearing in
+// the hydrogels figure for the Morpho paper.
+import "ConfinedHydrogel.morpho"
+
+// This class runs a swelling experiment for the hydrogel.
+class ExperimentManager {
+
+    // Simulate a single tetrahedron of a swelling hydrogel
+    tetrahedron() {
+
+        var m = Mesh("tetrahedron.mesh")
+        var dr = "tetrahedron"
+        system("mkdir ${dr}") // Make the directory
+        
+        var h = ConfinedHydrogel(dr=dr, domain=m)
+        h.setupProblem()
+        h.setupOptimizer(stepsize=0.1)
+        h.export("${dr}/frame_1.vtk")
+        h.run(5000)
+        h.export("${dr}/frame_5000.vtk")
+    
+    }
+
+    // Simulate a unit sphere of a swelling hydrogel
+    uniformSwelling() {
+    
+        var dr = "uniformSwelling" // Directory name in which to save the data
+        system("mkdir ${dr}") // Make the directory
+        
+        var h = ConfinedHydrogel(dr=dr, storeVolume=true)
+
+        h.setupProblem()
+
+        h.setupOptimizer(stepsize=0.1)
+
+        h.export("${dr}/frame_1.vtk")
+        h.run(5000)
+        h.export("${dr}/frame_5000.vtk")
+
+    }
+
+    // Simulate a unit sphere of a swelling hydrogel surrounded by Np
+    // beads of radius rbead.
+    withBeads(Np=120, rbead=0.3) {
+    
+        var dr = "Np_${Np}_r_${rbead}" // Directory name in which to save the data
+        system("mkdir ${dr}") // Make the directory
+        
+        var h = ConfinedHydrogel(dr=dr, storeVolume=true)
+
+        h.setupProblem()
+
+        h.addBeads(Np=Np, r=rbead)
+
+        h.setupOptimizer(stepsize=0.1)
+
+        h.export("${dr}/frame_1.vtk")
+        h.run(5000)
+        h.export("${dr}/frame_5000.vtk")
+
+    }
+
+    // Simulate a unit sphere of a swelling hydrogel surrounded by a
+    // wall at z=-1 and an superellipsoidal sphere at z=+1
+    supersphereAndWall(rbead=0.5) {
+
+        var dr = "supersphere_wall_rbead_${rbead}" // Directory name in which to save the data
+        system("mkdir ${dr}") // Make the directory
+        
+        var h = ConfinedHydrogel(dr=dr, storeVolume=true)
+
+        h.setupProblem()
+
+        h.addBeads(Np=1, r=rbead, n=4) // n corresponds to the superellipsoidal equation x^n+y^n+z^n = rbead^n
+        h.addWall(a=0, b=0, c=1, d=1) // z+1>0
+
+        h.setupOptimizer(stepsize=0.1)
+
+        h.export("${dr}/frame_1.vtk")
+        h.run(5000)
+        h.export("${dr}/frame_5000.vtk")
+
+    }
+
+}
+
+// Generate an ExperimentManager object
+var myexp = ExperimentManager()
+
+// Run all the experiments!
+
+// Swell a single tetrahedron
+myexp.tetrahedron()
+
+// Swell a sphere
+myexp.uniformSwelling()
+
+// Swell a sphere surrounded by Np beads of radius rbead
+myexp.withBeads(Np=120, rbead=0.3)
+myexp.withBeads(Np=40, rbead=0.6)
+myexp.withBeads(Np=10, rbead=0.9)
+
+// Swell in the presence of a supersphere and a wall
+myexp.supersphereAndWall()

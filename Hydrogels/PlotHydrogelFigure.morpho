@@ -1,0 +1,201 @@
+// This code generates the panels appearing in the hydrogels figure for
+// the Morpho paper.
+import meshtools
+import vtk
+import plot 
+import povray 
+import color
+import meshgen 
+import meshslice
+
+// Setting up some colors for the plots
+fn decimal(a, b, c) {
+    return Color(a/255, b/255, c/255)
+}
+
+var LightGray = decimal(179, 179, 179)
+var clrBefore = Color(1.0, 0.0, 0.0)
+var clrAfter = Color(0.25, 0.25, 0.25)
+var beadColor = LightGray
+var pltgrade = 1
+
+// This class generates the graphics from the swelling experiments for
+// the hydrogel.
+class PlotHydrogelFigure {
+
+
+    // Helper function that generates the initial and final position of
+    // the hydrogel as a Graphic
+    _plotHydrogel(dir, n, rbead) {
+
+        var mref = VTKImporter("${dir}/frame_1.vtk").mesh()
+        var m = VTKImporter("${dir}/frame_${n}.vtk").mesh()
+        var sref = Selection(mref, boundary=true)
+        var s = Selection(m, boundary=true)
+        sref.addgrade(1)
+        s.addgrade(1)
+        var gref = plotmesh(mref,
+                        selection=sref,
+                        grade=pltgrade,
+                        color=clrBefore
+                        )
+
+        var gcurrent1 = plotmesh(m,
+                            selection=s,
+                            grade=pltgrade,
+                            color=clrAfter,
+                            transmit=0.5)
+
+        var g = gref + gcurrent1
+
+        return g
+    }
+
+    // Helper function that generates a slice of the initial and final
+    // position of the hydrogel as a Graphic
+    _plotHydrogelSlice(dir, n, rbead) {
+
+        var mref = VTKImporter("${dir}/frame_1.vtk").mesh()
+        var m = VTKImporter("${dir}/frame_${n}.vtk").mesh()
+
+            // First create the slicer 
+        var sliceref = MeshSlicer(mref)
+        var slice = MeshSlicer(m)
+
+        // We'll perform a slice 
+        var slcref = sliceref.slice([0,0,0], [0,1,0])
+        var slc = slice.slice([0,0,0], [0,1,0])
+
+        // Visualization 1: Show the three slices 
+        var g = plotmesh(slcref, grade=[1], color=clrBefore)
+        g = g + plotmesh(slc, grade=[1], color=clrAfter)
+        
+        return g 
+
+    }
+
+    // Helper function that adds the beads to the Graphic object
+    _plotBeads(g, dir, rbead) {
+        try {
+            var beads = VTKImporter("${dir}/beads.vtk").mesh()
+            print "Beads found!"
+            var beadpos = beads.vertexmatrix()
+            print beads.count()
+            for (i in 0...beads.count()) {
+                g.display(Sphere(beadpos.column(i), rbead, transmit=0.85, color=beadColor))
+            }
+        } catch {
+            "FlOpnFld": print "No beads found"
+        }
+        return g
+    }
+
+    // Helper function that adds the supersphere beads as well as the
+    // plane to the Graphic object
+    _plotSuperspherePlane(g, dir, rbead) {
+        try {
+            var beads = VTKImporter("${dir}/beads.vtk").mesh()
+            print "Beads found!"
+            var beadpos = beads.vertexmatrix()
+            print beads.count()
+            for (i in 0...beads.count()) {
+                var r = beadpos.column(i)
+                var dh = 0.1
+                var dom = Domain(fn (x) -(((x[0]-r[0])^4+(x[1]-r[1])^4+(x[2]-r[2])^4)^(1/4)-rbead))
+                var mg = MeshGen(dom, [r[0]-2*rbead..r[0]+2*rbead:dh, r[1]-2*rbead..r[1]+2*rbead:dh, r[2]-2*rbead..r[2]+2*rbead:dh], quiet=false)
+                var m = mg.build()
+                m.addgrade(2)
+                g = g + plotmesh(m, grade=2, color=LightGray)
+            }
+        } catch {
+            "FlOpnFld": print "No beads found"
+        }
+        
+        var mplane = AreaMesh(fn (u,v) [u, v, -1], -3..3:1, -3..3:1)
+        g = g + plotmesh(mplane, grade=2, color=Color(0.5,0.5,0.5))
+        return g
+    }
+    
+    // Helper function to generate a povray rendering of the Graphic
+    // object
+    _render(g, name, viewpoint=nil, light=nil) {
+
+        g.background = White
+        var pov = POVRaytracer(g)
+        pov.viewangle = 50
+        
+        pov.viewpoint = Matrix([0,0,6])
+        if (!isnil(viewpoint)) pov.viewpoint=viewpoint
+        
+        pov.light=[Matrix([3,3,5]), Matrix([-3,-3,-5]), Matrix([0,0,8]), Matrix([0,0,-8])]  
+        if (!isnil(light)) pov.light=light
+       
+        pov.render("${name}.pov", display=false)
+
+    }
+
+    // Function to plot the free expansion of hydrogel (panels A and B
+    // use this)
+    plotFreeExpansion(dir, n, rbead) {
+        
+        var g = self._plotHydrogel(dir, n, rbead)
+        g.background = White
+        // self._render(g, dir, viewpoint=Matrix([ 0.783311, 0.134861, 3.20243 ]))
+        self._render(g, dir, viewpoint=Matrix([ 3.45132, 1.54242, 4.69118 ]))
+
+    }
+
+    // Function to plot the expansion of hydrogel in the presence of
+    // spherical beads (panels C and D use this)
+    plotWithBeads(dir, n, rbead, viewpoint=nil) {
+        
+        self.g = self._plotHydrogel(dir, n, rbead)
+        self.g = self._plotBeads(self.g, dir, rbead)
+
+        self._render(self.g, dir, viewpoint=viewpoint)
+
+    }
+
+    // Function to plot the expansion of hydrogel in the presence of
+    // a superspherical bead and a wall (panel F uses this)
+    plotWithSuperspherePlane(dir, n, rbead) {
+        
+        self.g = self._plotHydrogel(dir, n, rbead)
+        self.g = self._plotSuperspherePlane(self.g, dir, rbead)
+
+        self._render(self.g, dir, viewpoint=Matrix([0,6,-2]), light=[Matrix([3,-3,5]), Matrix([-3,-3,5])])
+
+    }
+
+    // Function to plot a slice of the expansion of hydrogel in the
+    // presence of a superspherical bead and a wall (panel G uses this)
+    plotWithSuperspherePlaneSlice(dir, n, rbead) {
+        
+        self.g = self._plotHydrogelSlice(dir, n, rbead)
+        self.g = self._plotSuperspherePlane(self.g, dir, rbead)
+
+        self._render(self.g, "${dir}_slice", viewpoint=Matrix([0,6,-2]), light=[Matrix([3,-3,5]), Matrix([-3,-3,5])])
+
+    }
+
+}
+
+var myFigure = PlotHydrogelFigure()
+
+// Panel A
+myFigure.plotFreeExpansion("tetrahedron", 5000, 0)
+
+// Panel B
+myFigure.plotFreeExpansion("uniformSwelling", 5000, 0)
+
+// Panel C
+myFigure.plotWithBeads("Np_10_r_0.9", 5000, 0.9, viewpoint=Matrix([0,0,8.5]))
+
+// Panel D
+myFigure.plotWithBeads("Np_120_r_0.3", 5000, 0.3)
+
+// Panel F
+myFigure.plotWithSuperspherePlane("supersphere_wall_rbead_0.5", 5000, 0.5)
+
+// Panel G
+myFigure.plotWithSuperspherePlaneSlice("supersphere_wall_rbead_0.5", 5000, 0.5)

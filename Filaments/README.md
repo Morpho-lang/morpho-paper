@@ -14,9 +14,11 @@ in which case, it will use the default values $\Omega^{-1}=0.1$ and $\Phi = 1.15
 morpho5 FilamentOnSphere.morpho 0.1 5
 ```
 
-This will generate two files:
+This will generate four files:
 1. `curvature.vtk`, which stores the configuration in the VTK format, and
 2. `curvature.txt` storing the local curvature as a function of arclength in a text file. We will use this file to plot the curvature using Python.
+3. `final.png` is a POVRay-rendered image of the final configuration.
+4. `final.pov` is the POVRay file that can be re-used to render the image. 
 
 > Note: You can change the name of these files by modifying the last line of `FilamentOnSphere.morpho`
 

@@ -24,6 +24,9 @@ import vtk
 import povray 
 import "sortMesh.morpho"
 
+var OmegaInv = 0.1
+var phi = 5.0
+
 class Filament {
     // Initialize the filament with a given value of OmegaInv and phi,
     // the two dimensionless parameters explored in the paper.
@@ -193,16 +196,6 @@ class Filament {
 
 }
 
-var args = System.arguments()
-var OmegaInv, phi
-if (args.count()==0) {
-    OmegaInv = 0.1
-    phi = 2.3*Pi/2
-}
-else {
-    OmegaInv = Float(args[0])
-    phi = Float(args[1])
-}
 print "Running simulation for OmegaInv = ${OmegaInv} and Phi = ${phi}..."
 var filament = Filament(OmegaInv, phi)
 filament.setupOptimizer()

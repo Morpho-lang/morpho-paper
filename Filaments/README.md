@@ -4,15 +4,11 @@ This directory contains the codes to run the simulations for the flexible filame
 
 * `FilamentOnSphere.morpho` is the main Morpho file that solves the optimization problem for a fixed value of $\Omega^{-1}$ (strength of bending relative to the gravity) and $\Phi$ (length of the filament in units of the radius of the substrate), the parameters defined in the text.
 
-This file can be run directly using 
+This file can be run using 
 ```bash
 morpho5 FilamentOnSphere.morpho
 ```
-in which case, it will use the default values $\Omega^{-1}=0.1$ and $\Phi = 1.15\pi$. You can also pass these parameters as command line arguments in this order
-
-```bash
-morpho5 FilamentOnSphere.morpho 0.1 5
-```
+in which case, it will use the default values $\Omega^{-1}=0.1$ and $\Phi = 5$. You can change these paramteres by modifying lines 27-28 in the code.
 
 This will generate four files:
 1. `curvature.vtk`, which stores the configuration in the VTK format, and

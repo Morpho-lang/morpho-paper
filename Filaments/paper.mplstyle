@@ -1,0 +1,18 @@
+# Matplotlib style file for scientific plots.
+
+font.family : Helvetica
+
+# Font and plot settings
+
+font.size : 6 # 
+lines.linewidth : 1
+lines.markersize : 2
+axes.formatter.use_mathtext : True
+xtick.direction : in
+ytick.direction : in
+# Figure properties
+# Figure width is 8.6 cm (half column width in APS journals)
+# The height is set to 3/4th of the width by default
+
+figure.figsize : 3.385826771653543, 2.5393700787401574 
+figure.dpi : 300

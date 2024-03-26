@@ -1,0 +1,39 @@
+/*
+The `sortMesh` function provides a simple function that takes in a line mesh and returns the list of vertex indices in the order in which they are connected. This is useful to export the curvature vs arclength data. (This function is needed since we are using refinement. If we don't refine, the vertices are already ordered according to the arclength when generated using `LineMesh`.)
+*/
+fn sortMesh(m) {
+    var edgeToVertex = m.connectivitymatrix(0,1)
+    var vertexToEdge = m.connectivitymatrix(1,0)
+
+    var vid = 0 // Id of first vertex
+    var edges = vertexToEdge.rowindices(vid) // Id of first edge
+    var vertices = edgeToVertex.rowindices(edges[0]) 
+    var ids = [vid]
+    vid = vertices[1]
+    ids.append(vid)
+    var dictV = Dictionary()
+    dictV["0"] = true 
+    dictV["${vid}"] = true
+    var dictE = {"${edges[0]}": true}
+
+    while (ids.count()!=m.count()) {
+        edges = vertexToEdge.rowindices(vid) // Get the vertices connected to this edge 
+        if (edges.count()==1) break
+        for (eid in edges) {
+            if (!dictE.contains("${eid}")) {
+                vertices = edgeToVertex.rowindices(eid)
+                dictE["${eid}"] = true 
+                for (vertex in vertices) {
+                    if (!dictV.contains("${vertex}")) {
+                        vid = vertex
+                        ids.append(vid) // Append the adjacent vertex
+                        dictV["${vid}"] = true
+                    }
+                }
+            } 
+        }
+
+    }
+    return ids
+
+}

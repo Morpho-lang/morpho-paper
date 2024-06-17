@@ -1,0 +1,261 @@
+// Packages up the reikonization into a single function 
+// Uses f to develop upwind scheme rather than sf0 
+// Now with constraints!
+
+import finitediff 
+import moviemaker
+
+var Lx = 4        // Size of domain in x 
+var Ly = 2        // Size of domain in y 
+
+var Nx = 32      // Number of x points 
+var Ny = 16      // Number of y points 
+
+var dx = Lx/Nx    // x stepsize 
+var dy = Ly/Ny    // y stepsize 
+
+var lambda = 3    // Semimajor axis of the ellipse 
+var mu = 1    // Semiminor axis of the ellipse 
+
+var m = FDDomain(-Lx..Lx:dx, -Ly..Ly:dy) // Create the domain
+
+fn ell(x, y) {
+    return 0.1*(1-(x^2/lambda^2 + y^2/mu^2))
+}  
+
+fn bnd(x,y) {
+    if (abs(abs(x)-Lx)<dx/2 || abs(abs(y)-Ly)<dy/2) return 1
+    return 0 
+}
+
+fn bnd2(x,y) {
+    if (abs(abs(x)-Lx)<3*dx/2 || abs(abs(y)-Ly)<3*dy/2) return 1
+    return 0 
+}
+
+var f = FDField(m, ell) // Ellipse level set function
+
+var window = FDField(m, bnd) // Function that's 1 on the border
+var window2 = FDField(m, bnd2) // Function that's 1 on the border and first interior grid point
+var pane = window.op(fn (u) 1-u) // Function that's 1 on interior grid points
+var pane2 = window2.op(fn (u) 1-u) // Function that's 1 on interior grid points
+
+f=f*pane - window.op(fn (u) (Lx+1)*u) // Ensure upwinding scheme never uses boundary points
+
+var sb = ScaleBar(posn=[Lx+0.5,0,0], textcolor=Black)
+var sbgray = ScaleBar(posn=[Lx+0.5,0,0], colormap=GrayMap(), textcolor=Black)
+
+var alpha = 1.5*dx
+
+fn heaviside(u) { // Differentiable approximation of the Heaviside function
+    if (u>alpha) return 1 
+    else if (u<-alpha) return 0 
+    return (1 + u/alpha + 1/Pi*sin(Pi*u/alpha))/2
+} 
+
+fn dirac(u) { // Dirac delta
+    if (u>alpha || u<-alpha) return 0
+    return (1 + cos(Pi*u/alpha))/2/alpha
+}
+
+fn sgn(u) { // Signum function
+    return 2*heaviside(u)-1
+}
+
+fn normdf(f) { // |df|
+    return (f.diff(0)^2/(2*dx)^2 + f.diff(1)^2/(2*dy)^2).op(sqrt)
+}
+
+fn pos(u) { // Positive values only 
+    if (u>0) return u 
+    return 0 
+}
+
+fn neg(u) {
+    if (u<0) return u 
+    return 0 
+}
+
+fn choose(a, b, s) {
+    if (s<0) {
+        var na = neg(a), pb = pos(b)
+        return max(na*na, pb*pb) 
+    } else if (s>0) {
+        var pa = pos(a), nb = neg(b)
+        return max(pa*pa, nb*nb)
+    }
+    return 0 
+}
+
+fn uwdiff(f,axis) {
+    var l=f-f.roll(1,axis), r=f.roll(-1,axis)-f
+    var w=l.field.op(choose, r.field, f.field) // Choose appropriate value
+    return f.toFDField(w) 
+}
+
+fn uwnormdf(f) { // |df|
+    return (uwdiff(f,0)/(dx^2) + uwdiff(f,1)/(dy^2)).op(sqrt)
+}
+
+fn reeikonize(fin, maxiterations=10000) {
+    var f = fin
+    var sf0 = fin.op(sgn)
+    var dt = dx/4     // Timestep 
+
+    var update = pane*sf0*uwnormdf(f).op(fn (x) 1-x)
+    f += dt*update // Euler for first step 
+
+    for (iter in 1..maxiterations) {
+        var newupdate = pane*sf0*uwnormdf(f).op(fn (x) 1-x)
+        var df = 1.5*dt*newupdate - 0.5*dt*update 
+        f += df
+        var err = df.field.linearize().norm(1)/(Nx*Ny)
+        //print "${iter} |err| = ${err}"
+        if (err<dx*dy*dt) break 
+        update=newupdate
+    }
+
+    return f 
+}
+
+// Now to solve the Young-Laplace equation
+
+f = reeikonize(f)
+
+var finit = f.clone()
+
+var eps = 1e-10
+
+fn total(f) {
+    return f.field.linearize().sum()*dx*dy
+}
+
+fn epssqrt(u) {
+    var s = sqrt(u)
+    if (s<eps) s=eps 
+    return s 
+} 
+
+fn area(f) {
+    return total(f.op(heaviside)) 
+} 
+
+fn length(f) {
+    var fx = f.diff(0)/(2*dx)
+    var fy = f.diff(1)/(2*dy)
+
+    var normdf = (fx^2 + fy^2).op(epssqrt) // |df|
+    
+    var diracf = f.op(dirac)
+    return total(diracf*normdf) // Length of the interface 
+} 
+
+fn update(f) { 
+    var fx = f.diff(0)/(2*dx)
+    var fy = f.diff(1)/(2*dy)
+
+    var normdf = (fx^2 + fy^2).op(epssqrt) // |df|
+
+    var divfx = fx/normdf
+    var divfy = fy/normdf 
+
+    var df = divfx.diff(0)/(2*dx) + divfy.diff(1)/(2*dy)
+
+    var pnormdf = pane2*normdf
+    var deltaf = pnormdf*df 
+
+    // Now for the constraint 
+    var diracf = f.op(dirac)
+    var L = total(diracf*normdf) // Length of the interface 
+    var K = total(diracf*deltaf) // Curvature of the interface 
+
+    var mu = K/L // Mean curvature 
+
+    return deltaf - mu*pnormdf
+}
+
+fn reproject(f, target, tol=1e-4, maxiterations=10) {
+    for (i in 1..maxiterations) {
+        var h0 = total(f.op(heaviside)) // Current area 
+        var diff = h0 - target 
+
+        print "  Reprojection ${i}: ${diff}"
+
+        if (abs(diff)<tol) break 
+
+        var fx = f.diff(0)/(2*dx)
+        var fy = f.diff(1)/(2*dy)
+        var normdf = (fx^2 + fy^2).op(epssqrt) // |df|
+        var diracf = f.op(dirac)
+
+        var L = total(diracf*normdf) // Length of the interface 
+
+        f -= diff/L*pane2*normdf
+    }
+    return f 
+}
+
+//Show(plotfdfield(f, scalebar=sb))
+//Show(plotfdfield(f.op(heaviside), scalebar=sb))
+
+var area0 = area(f)
+
+var dt = dx*dy/4     // Timestep 
+
+var up = update(f)
+
+f += dt*up // Euler for first step 
+
+f = reeikonize(f, maxiterations=10)
+f = reproject(f, area0)
+
+var mov = MovieMaker("shape/shape") 
+var movls = MovieMaker("field/field") 
+var cam = Camera(viewpoint=Matrix([0,0,25])) 
+
+var light = [Matrix([10,10,10]), Matrix([0,0,10]), Matrix([-10,-10,10])]
+
+var flast
+
+var output = File("finitediff.out", "w") 
+
+for (iter in 1..10000) {
+    flast = f 
+
+    var newup = update(f)
+    var df = 1.5*dt*newup - 0.5*dt*up
+
+    f += df
+
+    f = reeikonize(f, maxiterations=2)
+    f = reproject(f, area0)
+
+    var delta = (pane2*(flast - f)).field.linearize().norm()/(Nx*Ny)
+
+    print "==${iter} length=${length(flast)} area=${area(flast)} |delta f| = ${delta}"
+
+    output.write("${iter}, ${length(flast)}, ${area(flast)}, ${delta}")
+
+    if (delta<1e-8) break 
+
+    if (mod(iter, 50)==0) {
+        var gf = plotfdfield(f.op(heaviside).op(fn (u) 1-u), scalebar=sbgray, colormap=GrayMap())
+        var gs = plotfdfield(f, scalebar=sb, range=[-2.5,1.5])
+        gf.background = White
+        gs.background = White
+        mov.frame(gf, camera=cam, lights = light)
+        movls.frame(gs, camera=cam, lights = light)
+    }
+
+    up=newup
+}
+
+output.close() 
+
+mov.make() 
+movls.make() 
+//mov.clean() 
+
+//Show(plotfdfield(f, scalebar=sb))
+//Show(plotfdfield(f.op(heaviside), scalebar=sb))
+//Show(plotfdfield(f-finit, scalebar=sb))

@@ -1,0 +1,110 @@
+/* Minimize the area of a surface at constant enclosed volume. */
+
+import graphics
+import meshtools
+import plot
+import optimize
+import povray
+
+var Nlevels = 4 // Levels of refinement
+var Nsteps = 1000 // Maximum number of steps per refinement level
+
+// Create an initial cube
+var m = PolyhedronMesh([ [-0.5, -0.5, -0.5],
+                         [ 0.5, -0.5, -0.5],
+                         [-0.5,  0.5, -0.5],
+                         [ 0.5,  0.5, -0.5],
+                         [-0.5, -0.5,  0.5],
+                         [ 0.5, -0.5,  0.5],
+                         [-0.5,  0.5,  0.5],
+                         [ 0.5,  0.5,  0.5]],
+                       [ [0,1,3,2], [4,5,7,6],
+                         [0,1,5,4], [3,2,6,7],
+                         [0,2,6,4], [1,3,7,5] ])
+
+// Set up the problen
+var problem = OptimizationProblem(m)
+var la = Area()
+problem.addenergy(la)
+
+var lv = VolumeEnclosed()
+problem.addconstraint(lv)
+
+// Create the optimizer
+var opt = ShapeOptimizer(problem, m)
+
+// Perform the optimization
+for (i in 1..Nlevels) {
+  opt.conjugategradient(Nsteps)
+
+  if (i==Nlevels) break
+  // Refine
+  var mr=MeshRefiner([m])
+  var refmap = mr.refine()
+  for (el in [problem, opt]) el.update(refmap)
+  m = refmap[m]
+}
+
+// Deform mesh into initial ellipsoid
+for (id in 0...m.count()) {
+  var x = m.vertexposition(id)
+  x[0]*=1.5874
+  x[1]*=0.793701
+  x[2]*=0.793701
+  m.setvertexposition(id, x)
+}
+
+fn vis(m, file) {
+  var gdisp = plotmesh(m, grade=1, color=Black) + plotmesh(m, grade=2)
+  gdisp.background = White
+  var pov = POVRaytracer(gdisp)
+
+  pov.viewpoint = Matrix([-10,-3,-8])/2
+  pov.vertical = Matrix([0,1,0])
+  
+  pov.background = White
+  
+  pov.light=[Matrix([10,10,10]), Matrix([10,-10,10]), Matrix([10,-10,-10])]
+  pov.render(file)
+}
+
+m.addgrade(1)
+
+m.save("start.mesh")
+
+var problem = OptimizationProblem(m)
+var la = Area() 
+problem.addenergy(la)
+
+var lv = VolumeEnclosed()
+problem.addconstraint(lv)
+
+var reg = OptimizationProblem(m)
+var leq = EquiElement()
+reg.addenergy(leq) 
+
+reg.addconstraint(lv)
+
+var opt = ShapeOptimizer(problem, m)
+opt.stepsize = 0.2
+var ropt = ShapeOptimizer(reg, m)
+ropt.stepsize = 0.0001
+
+var f = File("noreg.txt", "w")
+
+for (iter in 1..200) {
+  //if (mod(iter, 10)==1) vis(m, "reg${iter}.pov") 
+  opt.linesearch(10)
+  if (opt.hasconverged()) break 
+  //ropt.relax(5)
+
+  f.write("${iter} ${la.total(m)}")
+}
+
+f.close() 
+
+m.save("end.mesh")
+
+Show(plotmesh(m, grade=1, color=Black) + plotmesh(m, grade=2))
+
+vis(m, "end.pov")

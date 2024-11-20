@@ -1,0 +1,201 @@
+import meshgen 
+import plot 
+import optimize
+import povray
+
+class Droplet {
+    init(sigma=1, deltasigma=0) {
+        self.sigma = sigma // Isotropic surface tension fluid-air
+        self.deltasigma = deltasigma // Difference between surface tension of air-substrate interface and fluid-substrate interface
+    }
+
+    initialMesh() {
+        var c = CircularDomain([0,0], 1)                          
+        var hs = HalfSpaceDomain(Matrix([0,0]), Matrix([0,1]))    
+        var dom = c.difference(hs)                                
+        var mg = MeshGen(dom, [-1..1:0.2, -1..1:0.2], quiet=true) 
+        self.mesh = mg.build()                                    
+    }
+
+    initialSelections() {
+        self.bnd = Selection(self.mesh, boundary=true)                    
+        self.upper = Selection(self.mesh, fn (x,y) x^2+y^2>0.99)          
+        self.upper.addgrade(1)                                           
+        self.lower = Selection(self.mesh, fn (x,y) y<0.01)                
+        self.lower.addgrade(1)                                           
+    }
+
+    setupProblem() {
+        var problem=OptimizationProblem(self.mesh)
+
+        var llength = Length()
+        problem.addenergy(llength, selection=self.upper, prefactor=self.sigma) 
+        problem.addenergy(llength, selection=self.lower, prefactor=self.deltasigma)  
+
+        var larea = Area() 
+        problem.addconstraint(larea) 
+
+        var lcons = ScalarPotential(fn (x,y) y)
+        problem.addlocalconstraint(lcons, selection=self.lower)
+
+        self.problem = problem 
+    }
+
+    optimize(maxiterations=500) {
+        var opt = ShapeOptimizer(self.problem, self.mesh)
+        opt.conjugategradient(maxiterations)
+    }
+
+    visualize() {
+        return plotmesh(self.mesh, grade=[0,1])
+    }
+}
+
+class NematicDroplet is Droplet {
+    init(initialState=nil, sigma=1, deltasigma=0, k=1, wupper=1, wlower=1) {
+        super.init(sigma=sigma, deltasigma=deltasigma)
+
+        if (initialState) self.importData(initialState)
+
+        self.k = k
+        self.wupper = wupper 
+        self.wlower = wlower 
+    }
+
+    initialField() {
+        self.director = Field(self.mesh, Matrix([1,0,0]))
+    }
+
+    importData(obj) {
+        self.mesh = obj.mesh
+        self.upper = obj.upper
+        self.lower = obj.lower
+        self.bnd = obj.bnd
+    }
+
+    setupProblem() {
+        super.setupProblem() // Initialize the problem with the isotropic part
+
+        var lnem = Nematic(self.director) // Nematic elasticity
+        self.problem.addenergy(lnem, prefactor = self.k) 
+
+        fn anchintegrand(x, n) { // Integrand for anchoring energy 
+            var t = tangent()    // Gets the local tangent vector 
+            return (n[0]*t[0]+n[1]*t[1])^2
+        }
+
+        var lanch = LineIntegral(anchintegrand, self.director) // Anisotopic surface tension (anchoring)
+        self.problem.addenergy(lanch, selection=self.lower, prefactor=-self.wlower) 
+        self.problem.addenergy(lanch, selection=self.upper, prefactor=-self.wupper) 
+
+        var lnorm = NormSq(self.director)                      // Unit vector constraint 
+        self.problem.addlocalconstraint(lnorm, field=self.director, target=1) 
+    }
+
+    updateParameters(sigma=nil, deltasigma=nil, k=nil, wupper=nil, wlower=nil) {
+        if (sigma) self.sigma=sigma 
+        if (deltasigma) self.deltasigma=deltasigma 
+        if (k) self.k = k
+        if (wupper) self.wupper = wupper 
+        if (wlower) self.wlower = wlower 
+
+        self.setupProblem() // Regenerate problem 
+    }
+
+    optimize(maxiterations=500, altiterations=10) {
+        var opt = ShapeOptimizer(self.problem, self.mesh)
+        var fopt = FieldOptimizer(self.problem, self.director)
+
+        for (i in 1..maxiterations) { // Alternating optimization scheme for Shape and Field
+            fopt.conjugategradient(altiterations)
+            opt.conjugategradient(altiterations)
+            if (opt.hasconverged() && fopt.hasconverged()) break 
+        }
+    }
+
+    refine() {
+        var mr = MeshRefiner([self.mesh, self.director, self.bnd, self.upper, self.lower])
+        var refmap = mr.refine()
+
+        // Now refinement is done update the problems and optimizers
+        for (el in [self.problem]) el.update(refmap)
+
+        // Update our references 
+        self.mesh = refmap[self.mesh]   // There are tidier ways to do this!
+        self.director = refmap[self.director]
+        self.bnd = refmap[self.bnd]
+        self.lower = refmap[self.lower]
+        self.upper = refmap[self.upper]
+    }
+
+    regularize(maxiterations=10) {
+        var reg=OptimizationProblem(self.mesh) // Create an ancillary regularization problem
+
+        var leq = EquiElement() // Function to equalize elements
+        reg.addenergy(leq)
+
+        var lcons = ScalarPotential(fn (x,y) y) // Level set constraint for lower boundary
+        reg.addlocalconstraint(lcons, selection=self.lower) 
+
+        var ropt = ShapeOptimizer(reg, self.mesh) 
+        ropt.stepsize = 0.001
+        ropt.fix(self.upper) // Fix upper boundary
+
+        ropt.conjugategradient(maxiterations)
+        equiangulate(self.mesh) // Edge flips
+    }
+
+    visualizeDirector() {
+        // Estimate scale from mean mesh separation
+        var scale = 0.7*Length.total(self.mesh)/self.mesh.count(1) 
+
+        var g = Graphics() 
+        for (id in 0...self.mesh.count()) {
+            var x = self.mesh.vertexposition(id) // Get the position of vertex id
+            var xx = Matrix([x[0], x[1], 0])     // Promote it to a 3D vector 
+            var nn = self.director[0,id]         // Get the corresponding director 
+            g.display(Cylinder(xx-scale*nn, xx+scale*nn, aspectratio=0.2, color=White)) 
+        }
+        return g
+    } 
+
+    visualize() {
+        return plotmesh(self.mesh, grade=1) + self.visualizeDirector()
+    }
+}
+
+var sim = Droplet(sigma=20,deltasigma=-4)  
+
+sim.initialMesh()
+sim.initialSelections() 
+sim.setupProblem() 
+sim.optimize() 
+
+var nsim = NematicDroplet(sigma=20,deltasigma=-4,k=1,wupper=1,wlower=1, initialState=sim)
+
+nsim.initialField()
+nsim.setupProblem() 
+nsim.optimize() 
+
+for (i in 1..2) {
+    nsim.refine()
+    nsim.optimize() 
+
+    var g=nsim.visualize()
+}
+
+for (w in 1..5:1) {
+    print "===Wupper=${w}"
+    nsim.updateParameters(wupper=w)
+    nsim.optimize()
+
+    var g = nsim.visualize()
+    g.background = White 
+    var pov = POVRaytracer(g)
+    pov.viewpoint = Matrix([0,0,8]) 
+    pov.render("nematiccontinue${w}.pov")
+}
+
+
+
+//Show(g)

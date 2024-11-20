@@ -1,0 +1,34 @@
+import graphics
+import optimize
+import meshtools
+
+var Nlevels = 5
+var Nsteps = 1000
+
+var m = Mesh("cube.mesh")
+
+var problem = OptimizationProblem(m)
+
+var la = Area()
+problem.addenergy(la)
+var lv = VolumeEnclosed()
+problem.addconstraint(lv)
+
+var opt = ShapeOptimizer(problem, m)
+
+opt.relax(Nsteps)
+
+for (i in 1..Nlevels) {
+  var mr = MeshRefiner(m)
+  var dict = mr.refine() 
+  for (e in [problem, opt]) e.update(dict)
+  m = dict[m]
+
+  opt.conjugategradient(Nsteps)
+}
+
+var V0=lv.total(m)
+var Af=la.total(m)
+var R=(V0/(4/3*Pi))^(1/3)
+var area = 4*Pi*R^2
+print "Final area: ${Af} True area: ${area} diff: ${abs(Af-area)}"

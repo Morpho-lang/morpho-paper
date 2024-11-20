@@ -1,0 +1,140 @@
+/*
+Script to model the experimental system described in the paper
+"Shapes of a filament on the surface of a bubble" :
+https://royalsocietypublishing.org/doi/10.1098/rspa.2021.0353
+Part of the scripts for the Morpho paper
+https://doi.org/10.48550/arXiv.2208.07859
+to produce Figure 4. 
+
+Here, we have a spherical bubble with a bendable wetted filament
+lying on its surface. Constrained on one end at the North pole, the
+filament is subject to internal bending energy and gravity. We aim to
+find the shape of the filament given two non-dimensional parameters:
+phi: the ratio of the length of the filament to the radius of the
+sphere, and 
+Omega_g: inverse of the elasto-gravitaty bendability. 
+
+Higher the Omega_g, stronger the gravitaitonal effects, and lower the
+Omega_g, stronger the bending effects.
+*/
+import meshtools
+import optimize
+import plot 
+import vtk
+import povray 
+
+var OmegaInv = 0.1
+var phi = 5.0
+
+class Filament {
+    // Initialize the filament with a given value of OmegaInv and phi,
+    // the two dimensionless parameters explored in the paper.
+    init(OmegaInv, phi) {
+        self.OmegaInv = OmegaInv
+        self.phi = phi // phi = 2*Pi covers a great circle of the sphere exactly
+        self.R = 1.0
+        self.f = 0.7
+        self.up = Matrix([0,0,1])
+        self.regulator = 5
+        self.N = 20 // Number of elements to discretize the filament
+        self.m = LineMesh(fn (t) [self.R*sin(t)*cos(self.f*t), self.R*sin(t)*sin(self.f*t), self.R*cos(t)], 0..self.phi:Pi/self.N) 
+        // self.m = LineMesh(fn (t) [self.R*sin(t), 0, self.R*cos(t)-self.R], 0..self.phi:Pi/self.N) 
+
+        self.m0 = self.m.clone() 
+
+        // Select the top end, to be fixed later
+        self.top = Selection(self.m, fn(x,y,z) x^2+y^2+(z-self.R)^2<0.0001)
+    }
+
+    setupProblem() {
+
+        self.problem = OptimizationProblem(self.m) 
+
+        // Bending energy
+        self.linecurv = LineCurvatureSq()
+        self.problem.addenergy(self.linecurv, prefactor=self.OmegaInv) 
+
+        // Gravitational potential energy
+        self.gravity = LineIntegral(fn (x) x.inner(self.up)) 
+        self.problem.addenergy(self.gravity)
+
+        self.problem.addconstraint(Length())
+        
+        // Constraint for the filament to lie on the sphere
+        self.lc = ScalarPotential(fn (x,y,z) x^2+y^2+z^2-self.R^2, fn (x,y,z) Matrix([2*x,2*y,2*z]))
+        self.problem.addlocalconstraint(self.lc) 
+
+        // Regularizer to ensure similar-sized elements
+        self.eq = EquiElement()
+        self.problem.addenergy(self.eq, prefactor=self.regulator) 
+
+    }
+
+    setupOptimizer() {
+        self.setupProblem()
+        self.opt = ShapeOptimizer(self.problem, self.m) 
+        self.opt.quiet = true 
+
+        self.fixedRegion = self.top
+        // Fixing the top end of the filament
+        self.opt.fix(self.fixedRegion)
+
+        self.opt.stepsize = 0.002
+        //opt.linesearch(10000) 
+        // opt.relax(10000)
+    }
+
+
+    // Function to wriggle the filament a little bit, to get it out of a
+    // local extremum and break symmetry. This is done by adding a small
+    // noise to the vertex positions
+
+    wriggle(noise=0.05) {
+        var rm = LineMesh(fn(t) noise*Matrix([(random()-0.5), (random()-0.5), (random()-0.5)]), 1..self.m.count())
+        var rmat = rm.vertexmatrix()
+        var vert = self.m.vertexmatrix()
+        self.m.setvertexmatrix(vert + rmat)
+        self.m.setvertexposition(0, Matrix([0,0,self.R]))
+
+    }
+
+    // Function to equilibrate a given configuration
+    equilibrate() {
+        self.opt.conjugategradient(10000)
+    }
+
+    // Function to equilibrate a given configuration with `iters` number of refinements
+    equilibrateWithRefine(iters=2) {
+        self.opt.conjugategradient(500)
+        for (i in 1..iters) {
+            self.refineFilament()
+            self.opt.conjugategradient(10000)
+        }
+    }
+
+    // Function to refine the mesh
+    refineFilament() {
+        self.mr = MeshRefiner([self.m, self.fixedRegion])
+        self.refmap = self.mr.refine()
+
+        // Now refinement is done update the problems and optimizers
+        // for (el in [self.problem, self.opt]) el.update(self.refmap)
+
+        // Use the new mesh and field
+        self.m = self.refmap[self.m]
+        self.fixedRegion = self.refmap[self.fixedRegion]
+        // Must ensure boundary remains correctly fixed
+        self.opt.fixed = []
+        self.opt.fix(self.fixedRegion)
+        // self.l0 = self.length() / self.m.count(1)
+        self.setupOptimizer()
+    }
+}
+
+print "Running simulation for OmegaInv = ${OmegaInv} and Phi = ${phi}..."
+var filament = Filament(OmegaInv, phi)
+filament.setupOptimizer()
+filament.wriggle()
+filament.equilibrateWithRefine()
+
+print "Total dof: ${filament.m.vertexmatrix().count()}"

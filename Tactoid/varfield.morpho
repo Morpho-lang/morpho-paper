@@ -1,0 +1,301 @@
+// Simulate the shape of a tactoid in 3D 
+// Following Prinsen & van der Schoot, Phys. Rev. E 68, 021701 (2003)
+
+import meshgen 
+import plot
+import vtk
+
+class TactoidSimulation {
+  init(kappa=1, omega=1) {
+    self.kappa = kappa 
+    self.omega = omega
+
+    self.mesh = nil 
+    self.director = nil
+  }
+
+  initialMesh(delta=0.2) {
+    var dom = fn (x) -(x[0]^2+x[1]^2+x[2]^2-1)
+    var mg = MeshGen(dom, [-1..1:delta, -1..1:delta, -1..1:delta])
+    self.mesh = mg.build()
+    self.mesh.addgrade(1)
+    self.mesh.addgrade(2)
+    return self.mesh
+  }
+
+  loadMesh(fname) {
+    self.mesh = Mesh(fname)
+  }
+
+  saveMesh(fname) {
+    self.mesh.save(fname)
+  }
+
+  loadVTK(fname) {
+    var vtkimp = VTKImporter(fname)
+    self.mesh = vtkimp.mesh()
+    self.director = vtkimp.field("director")
+  }
+
+  saveVTK(fname) {
+    var vtkexp = VTKExporter(self.director, fieldname="director") 
+    vtkexp.export(fname)
+  }
+
+  initialField() {
+    self.director = Field(self.mesh, Matrix([1,0, 0]))
+  }
+
+  setupSelections() {
+    self.bnd=Selection(self.mesh, boundary=true)
+    return self.bnd
+  }
+
+  setupProblem() {
+    self.problem = OptimizationProblem(self.mesh)
+    var lnematic=Nematic(self.director, ksplay=self.kappa, ktwist=self.kappa, kbend=self.kappa)
+    self.problem.addenergy(lnematic)
+
+    var larea=Area()
+    self.problem.addenergy(larea, selection=self.bnd)
+
+    var lanchoring=AreaIntegral(fn (x, n) n.inner(normal())^2, self.director)
+    self.problem.addenergy(lanchoring, selection=self.bnd, prefactor=self.omega)
+
+    var lvol=Volume()
+    self.problem.addconstraint(lvol)
+
+    var lnorm=NormSq(self.director)
+    self.problem.addlocalconstraint(lnorm, field=self.director, target=1)
+
+    var leq=EquiElement()
+    self.problem.addenergy(leq, prefactor=0.0001)
+
+    return self.problem
+  }
+
+  setupRegularization() {
+    self.rproblem = OptimizationProblem(self.mesh)
+
+    var leq=EquiElement()
+    self.rproblem.addenergy(leq)
+
+    return self.rproblem
+  }
+
+  setupOptimizers() {
+    self.sopt = ShapeOptimizer(self.problem, self.mesh)
+
+    self.fopt = FieldOptimizer(self.problem, self.director)
+    self.fopt.stepsize = 0.001
+    self.fopt.steplimit = 0.1
+    self.fopt.etol = 1e-6
+
+    self.ropt = ShapeOptimizer(self.rproblem, self.mesh)
+    self.ropt.fix(self.bnd)
+    self.ropt.stepsize = 0.001
+    self.ropt.steplimit = 0.01
+  }
+
+  boundingBox() { // Calculate bounding box for the mesh
+    var l = []
+    var x = self.mesh.vertexmatrix().transpose()
+    var dim = x.dimensions()[1]
+
+    for (i in 0...dim) {
+      l.append(bounds(x.column(i)))
+    }
+    return l 
+  }
+
+  aspectRatio() { // Calculate aspect ratio from bounding box
+    var bnds = self.boundingBox() 
+    for (b, k in bnds) {
+      bnds[k] = b[1]-b[0]
+    }
+    return max(bnds)/min(bnds)
+  }
+
+  hasConverged() {
+    return self.sopt.hasconverged() && self.fopt.hasconverged()
+  }
+
+  optimizeField(niter) {
+    //self.fopt.relax(1)
+    self.fopt.conjugategradient(niter)
+  }
+
+  optimizeShape(niter) {
+    self.sopt.relax(1)
+    self.sopt.conjugategradient(niter)
+  }
+
+  regularize(niter) {
+    self.ropt.linesearch(niter)
+  }
+
+  countElements() {
+    var out = []
+    for (g in 0..self.mesh.maxgrade()) {
+      var conn = self.mesh.connectivitymatrix(0, g)
+      if (conn) out.append(conn.dimensions()[1])
+      else out.append(0)
+    }
+    return out
+  }
+
+  refine(selection=nil) {
+    var mr = MeshRefiner([self.mesh, self.director]) 
+    var dict = mr.refine(selection=selection)
+    self.mesh=dict[self.mesh]
+    self.director=dict[self.director]
+
+    self.mesh.removegrade(2)
+    self.mesh.removegrade(1)
+    self.mesh.addgrade(1)
+    self.mesh.addgrade(2)
+
+    self.setupSelections()
+    self.setupProblem()
+    self.setupRegularization()
+    self.setupOptimizers()
+  }
+
+  selectRefineLength(lambda=1.5) {
+    var s = Selection(self.mesh)
+    var len = Length().integrand(self.mesh)
+    var mean = len.sum()/len.count() 
+    
+    for (l, id in len) {
+      if (l>lambda*mean) {
+        s[1,id]=true
+      }
+    }
+    return s
+  }
+
+  retriangulate() {
+    var pts = []
+    for (id in 0...self.mesh.count()) pts.append(self.mesh.vertexposition(id))
+    self.mesh=DelaunayMesh(pts)
+    var new=Field(self.mesh, self.director[0,0].clone())
+    for (id in 0...self.mesh.count()) new[0,id]=self.director[0,id]
+    self.director=new
+
+    self.mesh.removegrade(2)
+    self.mesh.removegrade(1)
+    self.mesh.addgrade(1)
+    self.mesh.addgrade(2)
+
+    self.setupSelections()
+    self.setupProblem()
+    self.setupOptimizers()
+    self.setupRegularization()
+  }
+
+  visualizeDirectorSize() {
+    var ll = Length().integrand(self.mesh)
+    return ll.sum()/ll.count()/3
+  }
+
+  visualizeMesh(grade=nil) {
+    var g = [2], sel = nil
+    if (grade) g = grade
+    if (!islist(g)) g = [ g ]
+
+    //if (!selection) if (g.contains(2)) sel = self.bnd
+    
+    return plotmesh(self.mesh, selection = sel, grade=g)
+  }
+
+  visualizeDirector(color=nil) {
+    var col = color
+    if (isnil(color)) col = White 
+    var dl = self.visualizeDirectorSize() 
+    var g = Graphics() // Create a graphics object
+    for (id in 0...self.mesh.count()) {
+      var x = self.mesh.vertexposition(id) 
+      var nn = self.director[0,id]
+      g.display(Cylinder(x-nn*dl, x+nn*dl, aspectratio=0.3, color=col))
+    }
+    return g
+  }
+
+  visualize() {
+    return self.visualizeMesh() + self.visualizeDirector()
+  }
+}
+
+// Attempt to curate the mesh
+fn curate(sim) {
+    //var sel = sim.selectRefineLength(lambda=1.5)
+    //Show(plotselection(sim.mesh, sel, grade=1))
+    //print "Refining ${sel.count(1)} elements:"
+    //sim.refine(selection=sel) 
+    print "Regularize:"
+    // Regularize the point spacing on the interior
+    sim.regularize(500)
+    print "Retriangulate:"
+    // Retriangulate to improve mesh quality
+    sim.retriangulate()
+}
+
+// Main optimization loop
+fn optimizationLoop(sim, niter) {
+    // Start with an optimized field
+    print "Initial field iteration:"
+    sim.optimizeField(100)
+    
+    for (i in 1..niter) {
+        for (j in 1..10) {
+            print "Shape iteration ${i}, ${j}"
+            sim.optimizeShape(5)
+            if (sim.sopt.totalenergy()>1000) return 
+            print "Field iteration ${i}, ${j}"
+            sim.optimizeField(20)
+            if (sim.hasConverged()) break
+        }
+        if (sim.hasConverged()) break
+
+        print "Regularization ${i}"
+        //sim.regularize(10)
+    }
+}
+
+var kappa = 10
+
+var sim = TactoidSimulation(kappa=kappa) 
+sim.initialMesh() 
+
+var fout = File("results-k${kappa}-reg.out", "w")
+
+for (omega, k in 1..10:0.25) {
+  print "Omega: ${omega}"
+  sim.kappa = kappa
+  sim.omega = omega 
+
+  // Reinitialize problem
+  sim.setupSelections()
+  sim.setupProblem()
+  sim.setupRegularization()
+  sim.setupOptimizers()
+
+  optimizationLoop(sim, 100)
+
+  if (sim.sopt.totalenergy()>1000) {
+    print "Energy limit exceeded ${sim.sopt.totalenergy()}"
+    break
+  }
+
+  var energy = sim.sopt.totalenergy()
+  var aspect = sim.aspectRatio()
+  print "Kappa: ${kappa}, Omega: ${omega}, Energy: ${energy}, Aspect ratio: ${aspect}"
+  fout.write("${kappa}, ${omega}, ${energy}, ${aspect}")
+
+  // Visualization
+  sim.saveVTK("varfield-${omega}-${kappa}.vtk")
+}
+
+Show(sim.visualize())
+
+fout.close() 

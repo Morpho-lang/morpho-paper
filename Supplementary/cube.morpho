@@ -2,7 +2,7 @@ import meshtools
 import plot 
 import optimize
 
-var Nlevels = 1 // Levels of refinement
+var Nlevels = 4 // Levels of refinement
 var Nsteps = 1000 // Maximum number of steps per refinement level
 
 // Create an initial cube
@@ -20,7 +20,6 @@ var faces = [ [0,1,3,2], [4,5,7,6],
               [0,2,6,4], [1,3,7,5] ]
 
 var m = PolyhedronMesh(vertices, faces)
-m.addgrade(1)
 
 // Set up the problem
 var problem = OptimizationProblem(m)

@@ -1,0 +1,323 @@
+/// Tubule pulling demo
+/// by Emmett Hamilton
+
+var kappa = 0.3 //prefactors for the optimization problem - mean curvature squared -should be between 10 and 20
+var sigma = 3 //prefactors for the optimization problem - area - should be between .428 and 428; works best if it is t least 3x as large as kappa
+
+var itermax = 50 //number of steps taken
+var toPlot = [50] //which steps should be plotted and saved. if empty, no visualisation or mesh saving will occur
+var dz = 0.05 //defines the change in height of the region getting pulled in each iteration
+
+import plot
+import optimize
+import histogram
+import povray
+import meshgen
+import meshtools
+
+//create the disk mesh
+var disk = Mesh("originaldisk.mesh")
+
+
+//everything from here to line 97 is just about making sure that we have selected enough, but not too many points to pull. 
+
+var verttoedge = disk.connectivitymatrix(1,0)
+var edgetovert = disk.connectivitymatrix(0,1)
+
+var size = 0.15 //ideal radius of the pulling region
+var pullingregion = Selection(disk)
+var centerx
+var centery
+var center = Selection(disk)
+
+//to be used to refine the centers as we create them
+var mr
+var refmap
+
+//function that creates a region centered roughly at (xcenter, ycenter)
+fn makearegion(xcenter, ycenter) {
+
+    //defines a larger around this specific future tube that gets refined
+    var region = Selection(disk, fn(x,y,z) (x-xcenter)^2 + (y-ycenter)^2 < size^2*10)
+    region.addgrade(1)
+    region.addgrade(0)
+
+    //refining the region around where will be pulled
+    mr=MeshRefiner([disk, region, center, pullingregion])
+    refmap = mr.refine(selection=region)
+
+    // update the mesh based on the refinement
+    disk = refmap[disk]
+    pullingregion = refmap[pullingregion]
+    center = refmap[center]
+    region = refmap[region]
+    
+    //define the actual part that will get pulled
+    center = Selection(disk, fn(x,y,z) (x-xcenter)^2 + (y-ycenter)^2 < size^2)
+    center.addgrade(1)
+    center.addgrade(0)
+
+    //make sure there are a satisfactory number of points in it
+    while((center.count(0) < 5 || center.count(0) > 7)) {
+        if(center.count(0) < 5) {
+            size = 1.1*size
+            center = Selection(disk, fn(x,y,z) (x-xcenter)^2 + (y-ycenter)^2 < size^2)
+        }
+        else if(center.count(0) > 7) {
+            size = 0.8*size
+            center = Selection(disk, fn(x,y,z) (x-xcenter)^2 + (y-ycenter)^2 < size^2)
+        }
+    }
+    
+
+    //based on the points selected, recalculate the center by taking the average of the coordinates
+    var sumofx = 0
+    var sumofy = 0
+    var centerpoints = center.idlistforgrade(0)
+    var positionsofcenterpoints
+
+    var xpos
+    var ypos
+    for(id in 0..centerpoints.count()-1){
+        xpos = disk.vertexposition(centerpoints[id])[0]
+        ypos = disk.vertexposition(centerpoints[id])[1]
+        sumofx = sumofx + xpos
+        sumofy = sumofy + ypos
+    }
+
+    var meanx = sumofx/center.count(0)
+    var meany = sumofy/center.count(0)
+
+    pullingregion = Selection(disk, fn(x,y,z) ((x-meanx)^2 + (y-meany)^2 < size^2))
+}
+
+fn selectProblemVertices(m) { //used in elimination of 4 fold vertices
+    var bnd = Selection(m, boundary=true)
+    var problem = Selection(m)
+
+    for (g in 1...m.maxgrade()) {
+        var cmat = m.connectivitymatrix(g, 0)
+
+        if (cmat) for (id in 0...m.count()) {
+            var conn = cmat.rowindices(id)
+            if (conn.count()<5 && 
+                !bnd[0,id]) {
+                problem[0,id] = true 
+            }
+        }
+    }
+    
+    return problem
+}
+
+fn linelength(m, id) { //used in elimination of 4 fold vertices
+    var ii = m.connectivitymatrix(0,1).rowindices(id)
+    var x1=m.vertexposition(ii[0])
+    var x2=m.vertexposition(ii[1])
+    return (x1-x2).norm() 
+}
+
+fn selectForPruning(m, sv) { //used in elimination of 4 fold vertices
+    var sel = Selection(m)
+    var clines = m.connectivitymatrix(1,0)
+
+    for (vid in sv.idlistforgrade(0)) { // Loop over problem vertices
+        var lines = clines.rowindices(vid)
+        var llengths = []
+        for (lid in lines) llengths.append(linelength(m,lid))
+        var did = lines[llengths.order()[0]]
+        sel[1,did]=true 
+    }
+
+    return sel 
+}
+
+//selects the region. note that this code must be modified if multiple tubes will be made
+makearegion(0, 0)
+pullingregion.addgrade(0)
+pullingregion.addgrade(1)
+
+//refine even more around the middle for pulling accuracy
+mr=MeshRefiner([disk, pullingregion])
+refmap = mr.refine(selection=Selection(disk, fn(x,y,z) x*x+y*y < 0.15))
+
+// update the mesh based on the refinement
+disk = refmap[disk]
+pullingregion = refmap[pullingregion]
+pullingregion.addgrade(1)
+
+//creates the functionals
+var area = Area()
+var mcs = MeanCurvatureSq()
+var le = Length()
+
+//define the boundary
+var bnd = Selection(disk, fn(x,y,z) x*x+y*y > 1.5*1.6) //fixes both the points right on the boundary and those slightly inside it for stability reasons
+bnd.addgrade(0)
+bnd.addgrade(1)
+
+//creates the "pulling"
+var hook = ScalarPotential(fn (x,y,z) z -dz, fn (x,y,z) Matrix([0,0,1]))
+
+//defines the optimization problem
+var problem = OptimizationProblem(disk)
+
+//establishes the constraints
+problem.addenergy(area, prefactor=sigma)
+problem.addenergy(mcs, prefactor=2*kappa) //factor of 2 comes from the equation
+problem.addlocalconstraint(hook, selection = pullingregion)
+
+//creates the regularizer
+var leq=EquiElement()
+var reg = OptimizationProblem(disk)
+reg.addenergy(leq)
+
+//creates the optimizers and fixes the boundaries of the disk
+var opt = ShapeOptimizer(problem, disk)
+//opt.quiet = true
+var ropt = ShapeOptimizer(reg, disk)
+ropt.quiet = true
+opt.fix(bnd)
+opt.steplimit = 0.0015
+opt.stepsize = 0.001
+ropt.fix(bnd)
+
+//actually does the optimization and refinement
+for(i in 1..itermax) { 
+    print i
+
+    print "Optimize"
+
+    //does the optimization
+    for(k in 1..10) {
+        var problem = OptimizationProblem(disk)
+        //because of a Selection Issue, I have to recreate the whole optimizers every time
+        //establishes the constraints
+        problem.addenergy(area, prefactor=sigma)
+        problem.addenergy(mcs, prefactor=2*kappa) //factor of 2 comes from the equation
+        problem.addlocalconstraint(hook, selection = pullingregion)
+
+        //creates the regularizer
+        var leq=EquiElement()
+        var reg = OptimizationProblem(disk)
+        reg.addenergy(leq)
+
+        var opt = ShapeOptimizer(problem, disk)
+        opt.quiet = true
+        var ropt = ShapeOptimizer(reg, disk)
+        ropt.quiet = true
+        opt.fix(bnd)
+        opt.steplimit = 0.0015
+        opt.stepsize = 0.001
+        ropt.fix(bnd)
+        opt.relax(30)
+        ropt.stepsize=0.0005/i
+        ropt.steplimit=0.0005/i
+        ropt.relax(15)
+    }
+    equiangulate(disk)
+    
+    //update the new target height
+    dz = dz + 0.08
+
+    // Select line segments that are too long for refinement
+    var en = le.integrand(disk)
+    var mean = en.sum()/en.count()
+
+    var srefine = Selection(disk)
+    srefine.addgrade(0)
+    srefine.addgrade(1)
+
+    //i will refine the areas around where the pulling happens more tightly than further out
+    var innerPart = Selection(disk, fn(x,y,z) x*x+y*y < 0.3)
+    innerPart.addgrade(1)
+    var innerTotal = 0
+    var innerCount = 0
+    for (id in 0...en.count()) {
+        if(innerPart[1,id]==true){
+            innerTotal = innerTotal+en[0,id]
+            innerCount = innerCount + 1
+        }
+    }
+    var innerMean = innerTotal/innerCount
+
+    for (id in 0...en.count()) {
+        if (innerPart[1,id]==true){
+            //for segments in the inner section, it refines them more leniently than those on the outer section; establishing a lower bound of length helps with stability.
+            //making the threshold depend on the mean of the whole disk in addition to the mean fo the central region helps prevent the length of the edges shrinking all the way to the
+            //lowest allowed bound of 0.135
+            if (en[0,id]>(2*mean+innerMean)/3 && bnd[1,id]==false && en[0,id] > 0.135) {
+            //marks specific edges for later refinement
+                srefine[1,id]=true
+            }
+            //i don't know that this line is strictly necessary but it 
+            //makes sure that things we don't want refined aren't refined
+            else{srefine[1,id]=false}
+        }
+        if (innerPart[1,id]==false&& bnd[1,id]==false){
+            if (en[0,id]>2*mean) {
+            //marks specific edges for later refinement
+                srefine[1,id]=true
+            }
+            //i don't know that this line is strictly necessary but it 
+            //makes sure that things we don't want refined aren't refined
+            else{srefine[1,id]=false}
+        }
+    }
+
+    // Adaptive refinement
+    mr=MeshRefiner([disk, bnd, pullingregion, srefine])
+    if (srefine.count(1)>0) {
+        //actually does the refinement of the previously selected selection
+        refmap = mr.refine(selection=srefine)
+        
+        //updates the mesh and selections
+        disk = refmap[disk]
+        bnd = refmap[bnd]
+        srefine = refmap[srefine]
+        bnd = Selection(disk, fn(x,y,z) x*x+y*y > 1.5*1.6) //fixes both the points right on the boundary and those slightly inside it for stability reasons
+        bnd.addgrade(1)
+        pullingregion = refmap[pullingregion]
+        
+        equiangulate(disk)
+    }
+
+    // Remove 4 fold vertices
+    var s = selectProblemVertices(disk)
+    while (s.count(0) > 0) { //removes all 4-fold vertices
+        var s2 = selectForPruning(disk, s)
+        var mp = MeshPruner([disk], fix=Selection(disk, fn(x,y,z) x*x+y*y > 1.5*1.6)) 
+        var dict = mp.prune(s2)
+        disk = dict[disk]
+        s = selectProblemVertices(disk)
+        bnd = Selection(disk, fn(x,y,z) x*x+y*y > 1.5*1.6)
+    }
+
+    //define the size of the pulling region for the next iteration
+    var size = 0.03
+    pullingregion = Selection(disk, fn(x,y,z) (x)^2 + (y)^2 < size)
+    pullingregion.addgrade(1)
+    pullingregion.addgrade(0)
+    //make sure there are a satisfactory number of points in it
+    while((pullingregion.count(0) < 5 || pullingregion.count(0) > 8)) {
+        if(pullingregion.count(0) < 5) {
+            size = 1.1*size
+            pullingregion = Selection(disk, fn(x,y,z) (x)^2 + (y)^2 < size)
+        }
+        else if(pullingregion.count(0) > 8) {
+            size = 0.8*size
+            pullingregion = Selection(disk, fn(x,y,z) (x)^2 + (y)^2 < size)
+        }
+    }
+    pullingregion.addgrade(1)
+
+    disk.save("pull${i}.mesh")
+
+    //show the mesh
+    if(toPlot.ismember(i)){
+        var g = plotselection(disk, pullingregion, grade = [0,1])
+        g.background = White
+        g.title = "Step ${i}"
+        Show(g)
+    }
+}

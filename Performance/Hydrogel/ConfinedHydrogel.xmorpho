@@ -1,0 +1,364 @@
+// This script contains important base classes needed to run the
+// hydrogel swelling experiment in Morpho.
+// Currently, the free energy parameters are hard-coded to generate a
+// ~6x free expansion of the hydrogel.
+// This file will be imported by the main script,
+// "HydrogelFigure.morpho", in order to run all the experiments needed
+// for Figure 3 of the Morpho paper.
+
+import meshtools
+import plot
+import optimize
+import color
+import povray
+import vtk
+import functionals
+
+// Make a class to manufacture axis aligned ellipsoids.
+// To create one, call Ellipsoid(origin, principalradii)
+class Ellipsoid {
+    init(x, r, n) {
+        self.origin = x
+        self.principalradii = r
+        self.n = n
+    }
+
+    // Returns a level set function for this Ellipsoid
+    levelset() {
+        fn phi (x,y,z) {
+            var x0 = self.origin, rr = self.principalradii
+            return ((x-x0[0])/rr[0])^self.n + ((y-x0[1])/rr[1])^self.n + ((z-x0[2])/rr[2])^self.n - 1
+        }
+      return phi
+    }
+
+    // Returns the a function that returns the gradient
+    // of the level set function for this Ellipsoid
+    gradient() {
+        fn dphi (x,y,z) {
+            var x0 = self.origin, rr = self.principalradii
+            return Matrix([self.n*(x-x0[0])^(self.n-1)/rr[0]^self.n,
+                        self.n*(y-x0[1])^(self.n-1)/rr[1]^self.n,
+                        self.n*(z-x0[2])^(self.n-1)/rr[2]^self.n])
+        }
+        return dphi
+    }
+  }
+
+// This class sets up the hydrogel swelling problem with optional
+// confinement via beads or walls.
+// dr: Directory in which to store the data
+// domain: optional custom mesh input
+// storeVolume: boolean flag to indicate whether to store volume as a
+// function of iterations.
+class ConfinedHydrogel {
+    init(dr=".", domain=nil, storeVolume=false) {
+
+        self.dr = dr 
+        if (domain==nil) {
+            self.m = Mesh("sphereweighted.mesh")
+        } else {
+            if (!ismesh(domain)) {
+                Error("ValueError", "Domain must be a mesh object.").throw()
+            }
+            else {
+                self.m = domain
+            }
+        }
+        if (!isbool(storeVolume)) {
+            Error("InvalidArgs", "storeVolume must be a boolean.").throw()
+        }
+        self.storeVolume = storeVolume
+        if (self.storeVolume) {
+            self.f = File("volume_${dr}.txt", "append")
+        }
+        self.m.addgrade(1)
+        self.m.addgrade(2)
+
+        self.mref = self.m.clone()
+        self.mref.addgrade(1)
+        self.mref.addgrade(2)
+        
+        self.s = Selection(self.m, boundary=true)
+        self.sref = Selection(self.mref, boundary=true)
+        self.s.addgrade(1)
+        self.sref.addgrade(1)
+
+        // Graphic for the reference mesh for use later
+        self.gref = plotmesh(self.mref,
+                             selection=self.sref,
+                             grade=1,
+                             color=Red,
+                             transmit=0.7)
+
+    
+        self.lv = Volume()
+        self.init_vol = self.lv.total(self.mref)
+        self.vol = self.lv.total(self.m) // Current volume
+
+        print "Initial volume : ${self.init_vol}"
+        
+
+        self.Ri = 1.0 // Initial radius of hydrogel sphere        
+        self.phi_i = 0.6
+        self.fha = 0.0 
+        self.fhb = 1.0
+        self.fhc = 0.499 // Flory-Huggins mixing parameter
+        self.fhd = -1.0 // Obtained from Mathematica
+        self.phir = 0.0359465 // Obtained from Mathematica
+
+        self.beadpos = [] // Have no beads around the hydrogel by default
+    
+    }
+
+    // Add beads of radius r around the hydrogel, just touching it. 
+    // This method draws from the thomson example, since the beads are
+    // distributed uniformly around the hydrogel. n here corresponds to
+    // the superspherical equation x^n+y^n+z^n = r^n.
+    // If Np=1, the bead will be touching the point (0,0,1)
+    addBeads(Np=10, r=0.3, n=2) {
+        
+        
+        self.Np = Np // Number of beads
+        self.rbead = r // Radius of beads
+        self.Rbead = self.Ri + self.rbead // Distance of each bead from the origin. 
+        // Create the mesh, which consists of Np random points each representing
+        // a single bead
+        var build = MeshBuilder()
+        if (Np==1) { // Don't randomize the position if only one bead is present
+            var x = Matrix([0, 0, 1])
+            x= x/x.norm()*self.Rbead // Project onto the "outer" sphere of radius Ri + rbead 
+            build.addvertex(x)
+        }
+        else {
+            for (i in 1..Np) {
+                var x = Matrix([2*random()-1, 2*random()-1, 2*random()-1])
+                x= x/x.norm()*self.Rbead // Project onto the "outer" sphere of radius Ri + rbead 
+                build.addvertex(x)
+            }
+        }
+        self.beadmesh = build.build() // Tell the MeshBuilder to build the mesh
+
+        // Specify the problem
+        self.beadproblem = OptimizationProblem(self.beadmesh)
+
+        // The particle repel one another by a Coulomb potential.
+        // We supply the potential and it's derivative wrt r as anonymous functions.
+        self.pairwise = PairwisePotential(fn (r) 1/r, fn (r) -1/r^2)
+        self.beadproblem.addenergy(self.pairwise)
+
+        // Constrain the particles on the "outer" sphere via a level set constraint.
+        // The level set function and its gradient are supplied as anonymous functions.
+        self.lsph = ScalarPotential(fn (x,y,z) x^n+y^n+z^n-self.Rbead^n, fn (x,y,z) Matrix([n*x^(n-1), n*y^(n-1), n*z^(n-1)]))
+        self.beadproblem.addlocalconstraint(self.lsph)
+
+        // Set up the optimizer to optimize this problem wrt the mesh vertex positions.
+        self.beadopt = ShapeOptimizer(self.beadproblem, self.beadmesh)
+
+        // Choose a stepsize
+        self.beadopt.quiet = true
+        self.beadopt.stepsize=0.01/sqrt(self.Np)
+
+        // Do a few iterations at fixed stepsize to move away from the initally random
+        // condition. [This helps condition the problem]
+        print "Arranging ${self.Np} beads evenly around the hydrogel..."
+        self.beadopt.relax(5)
+        // Now perform gradient descent
+        self.beadopt.conjugategradient(1000) // Perform up to 1000 iterations of direct gradient descent
+        
+        print "Success!"
+
+        // Save the bead mesh to a separate VTK file
+        VTKExporter(self.beadmesh).export("${self.dr}/beads.vtk")
+
+        // The bead positions will be the final vertex positions
+
+        self.beadpos = [] // Reset the bead positions 
+
+        self.vert = self.beadmesh.vertexmatrix()
+        // Add the bead positions from the vertices and visualize the
+        // result
+        
+        var g = plotmesh(self.mref, grade=2)
+        for (i in 0...self.beadmesh.count(0)) {
+            // Add to the list
+            var x = self.vert.column(i)
+            var lst = [ x[0], x[1], x[2] ]
+            self.beadpos.append(lst)
+            // Display each particle as a sphere
+            g.display(Sphere(x,self.rbead))
+        }
+        // Show(g) // Open up the viewer application
+        
+        if (self.beadpos.count()>0) {
+            // Add the hard sphere constraints from the beads
+            var rb = self.rbead // Temporarily using this because of Error #112
+            for (x in self.beadpos) {
+                // var ell=Ellipsoid(x, [self.rbead,self.rbead,self.rbead])
+                var ell=Ellipsoid(x, [ rb, rb, rb ], n)
+                var cons=ScalarPotential( ell.levelset(), ell.gradient() )
+                // var cons=ScalarPotential(ell.levelset() )
+                self.problem.addlocalconstraint(cons, onesided=true)
+            }
+        }
+
+    }
+
+    // Function to add a impenetrable wall whose planar equation is 
+    // a*x + b*y + c*z + d = 0.
+    // Choose the sign carefully to indicate which side of the plane the
+    // constraint is to be put on. 
+    // For instance, a=1, b=0, c=0 and d=1 will create a wall with the
+    // equation x+1=0, and constrain everything to x+1>0. You can
+    // introduce an overall minus sign to make it x+1<0.
+    // Similarly, a=-1 and d=1 will give a wall at x-1=0 and constrain
+    // everything to -x+1>0, or x<1.
+    addWall(a=1, b=0, c=0, d=1) {
+        fn wall(x,y,z) { return a*x + b*y + c*z + d }
+        fn wallgrad(x,y,z) { return Matrix([a, b, c]) }
+
+        var lscalar = ScalarPotential(wall, wallgrad)
+        self.problem.addlocalconstraint(lscalar, onesided=true)
+
+    }
+
+    // Function to return the value of the hydrogel functional
+    // integrand, at a given value of phi
+    fh(phi) { 
+        return self.fha*phi*log(phi) + 
+                self.fhb*(1-phi)/phi*log(1-phi) + 
+                self.fhc*(1-phi) + 
+                self.fhd*(log(self.phir/phi)/3.0 - (self.phir/ phi)^(2.0/3) + 1 )
+    }
+
+    // Function to setup the problem of swelling a hydrogel uniformly
+    setupProblem() {
+
+        self.problem = OptimizationProblem(self.m)
+
+        self.lfh = Hydrogel(self.mref,
+            a = self.fha,
+            b = self.fhb,
+            c = self.fhc,
+            d = self.fhd,
+            phiref=self.phir,
+            phi0=self.phi_i)
+
+        self.problem.addenergy(self.lfh)
+
+        var eps = 1e-6
+        var res = brent([eps, 0.5, 1-eps], self.fh, 1e-10, 100) // returns [phi_min, fh(phi_min)]
+
+        self.phi_f = res[0]
+
+        print "Expected volume ratio: ${self.phi_i/self.phi_f}"
+
+
+    }
+
+    // Function to optionally add a surface tension to the surface of
+    // the hydrogel. This can also be used as a regularizer to smoothen
+    // the surface.
+    addSurfaceTension(sigma=0.01) {
+        
+        self.bnd = Selection(self.m, boundary=true)
+
+        self.area = Area()
+
+        self.problem.addenergy(self.area, selection=self.bnd, prefactor=sigma)
+    
+    }
+
+    // Function to setup the ShapeOptimizer.
+    setupOptimizer(stepsize=0.01) {
+
+        self.opt = ShapeOptimizer(self.problem, self.m)
+
+        self.opt.stepsize = stepsize 
+        self.opt.quiet = true
+        self.opt.relax(10)
+        self.step = 0 // keep track of number of relaxation steps
+
+        
+    }
+
+    // Function that specifies the relaxation algorithm. Currently set
+    // to the standard gradient descent method `relax`
+    relax(n) { 
+        self.opt.relax(n) 
+        self.step += n
+    }
+
+    // Function to output the current volume of the hydrogel
+    volume() {
+        self.vol = self.lv.total(self.m)
+        return self.vol
+    }
+
+    // Function to output the ratio of the current volume to the
+    // initial volume
+    volumeratio() {
+        self.vol = self.lv.total(self.m)
+        return self.vol/self.init_vol
+    }
+
+    // Function that returns the Graphics object containing the current
+    // mesh and the beads, if any.
+    graphic() {
+        self.gcurrent = plotmesh(self.m,
+                                 selection=self.s,
+                                 grade=2,
+                                 color=Blue,
+                                 transmit=0.5)
+        var g = self.gref + self.gcurrent
+        if (self.beadpos.count()>0) {
+            for (x in self.beadpos) {
+                g.display(Sphere(x, self.rbead, transmit=0.9))
+            }
+        }
+        
+        return g
+    }
+
+    // Function to render the graphic using povray
+    render(fname, show=false) {
+       /* self.g = self.graphic()
+        self.pov = POVRaytracer(self.g)
+        self.pov.viewangle=50
+        self.pov.viewpoint=Matrix([3,4,5])
+        self.pov.light=[Matrix([3,3,5]), Matrix([-3,-3,-5]), Matrix([0,0,8]), Matrix([0,0,-8])]  
+        self.pov.render(fname,display=false)
+
+        if (show) Show(self.g)*/
+        
+    }
+
+    // Function to export the current configuration in a VTK file
+    export(fname) {
+        VTKExporter(self.m).export(fname)
+
+    }
+
+    // Function to run the simulation with a given number of steps.
+    run(steps, export=false) {
+
+        for (i in 1..steps){
+
+            if (i==1){
+                self.render("${self.dr}/sphere_${i}.pov", show=true)
+            }
+
+            if (export) self.export("${self.dr}/frame_${i}.vtk")
+            if (self.storeVolume) {
+                self.f.write("${i}    ${self.volume()}")
+                print "Step ${i}, Volume ratio: ${self.vol/self.init_vol}"
+            }
+            
+            self.relax(20)
+        }
+        if (self.storeVolume) {
+            self.f.close()
+        }
+    }
+
+}

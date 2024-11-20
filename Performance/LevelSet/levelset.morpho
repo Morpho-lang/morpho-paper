@@ -1,0 +1,188 @@
+import constants
+import meshtools
+import meshgen 
+import optimize
+import plot 
+import vtk
+
+class LevelSetSim {
+    init(Lx=5, Ly=3, Nx=16) {
+        self.Lx = Lx        // Size of domain in x 
+        self.Ly = Ly        // Size of domain in y 
+
+        self.delta = Lx/10
+        self.alpha = 1.5*self.delta
+    }
+
+    initialMesh() {
+        var dom = RectangularDomain([-self.Lx..self.Lx, -self.Ly..self.Ly])
+        var mg = MeshGen(dom, [-self.Lx..self.Lx:self.delta, -self.Ly..self.Ly:self.delta], quiet=true)
+        var m = mg.build() 
+        m = ChangeMeshDimension(m, 3)
+        for (id in 0...m.count()) {
+            var x = m.vertexposition(id)
+            x+=Matrix([0,0,0.1])
+            m.setvertexposition(id,x)
+        }
+        self.mesh = m 
+        return self.mesh
+    }
+
+    initialMeanArea() {
+        var la = Area().integrand(self.mesh)
+        self.initialMeanElementArea = la.sum()/la.count() 
+    }
+
+    initialField(lambda=2, mu=1) {
+        fn finit(x, y, z) {
+            return 1*(1-(x^2/lambda^2 + y^2/mu^2))
+        }
+
+        self.f = Field(self.mesh, finit) 
+    }
+
+    initialAreaConstraint() {
+        self.area = AreaIntegral(fn (x, f) self.heaviside(f), self.f).total(self.mesh)
+    }
+
+    saveVTK(fname) {
+        var vtkexp = VTKExporter(self.f, fieldname="phi") 
+        vtkexp.export(fname)
+    }
+
+    setupProblem() {
+        var problem = OptimizationProblem(self.mesh) 
+
+        var leikon = AreaIntegral(fn (x, f) (grad(f).norm()-1)^2, self.f)
+        problem.addenergy(leikon)
+
+        var llength = AreaIntegral(fn (x, f) self.dirac(f)*grad(f).norm(), self.f)
+        problem.addenergy(llength)
+
+        var larea = AreaIntegral(fn (x, f) self.heaviside(f), self.f)
+        var cons = problem.addconstraint(larea, field=self.f)
+        cons.target = self.area
+
+        self.problem = problem 
+        return problem
+    }
+
+    compare() {
+        var llength = AreaIntegral(fn (x, f) self.dirac(f)*grad(f).norm(), self.f)
+        var length = llength.total(self.mesh) 
+
+        var larea = AreaIntegral(fn (x, f) self.heaviside(f), self.f)
+        var area = larea.total(self.mesh)
+
+        var R = sqrt(area/Pi)
+        print "Area: ${area} Length: ${length} Predicted length: ${2*Pi*R} delta: ${abs(2*Pi*R-length)}"
+    }
+
+    output() {
+        var llength = AreaIntegral(fn (x, f) self.dirac(f)*grad(f).norm(), self.f)
+        var length = llength.total(self.mesh) 
+
+        var larea = AreaIntegral(fn (x, f) self.heaviside(f), self.f)
+        var area = larea.total(self.mesh)
+
+        var R = sqrt(area/Pi)
+
+        return "${area}, ${length}, ${2*Pi*R}, ${self.alpha}, ${self.countSupport()}, ${self.mesh.count()}"
+    }
+
+    setupOptimizer(steplimit=0.1, etol=1e-7) {
+        self.opt = FieldOptimizer(self.problem, self.f)
+        self.opt.stepsize = steplimit/2
+        self.opt.steplimit = steplimit
+        self.opt.etol = etol
+        self.opt.maxconstraintsteps = 200
+        return self.opt 
+    }
+
+    heaviside(u) { // Differentiable approximation of the Heaviside function
+        if (u>self.alpha) return 1 
+        else if (u<-self.alpha) return 0 
+        return (1 + u/self.alpha + 1/Pi*sin(Pi*u/self.alpha))/2
+    } 
+
+    update(dict) {
+        self.mesh = dict[self.mesh]
+        self.f = dict[self.f]
+    }
+
+    countSupport() {
+        var n=0
+        for (vid in 0...self.mesh.count()) {
+            var f = self.f[0,vid]
+            if (self.dirac(f)>0) n+=1
+        }
+        return n
+    }
+
+    refine() { // Refine mesh based on energy norm
+        var sel = Selection(self.mesh) // Elements to refine
+        
+        var larea = Area() 
+        var lcrit = AreaIntegral(fn (x, f) self.dirac(f)*grad(f).norm(), self.f)
+        var a = larea.integrand(self.mesh)
+        var e = lcrit.integrand(self.mesh)
+        var mean = e.sum()/e.count() 
+        for (id in 0...e.count()) {
+            if (e[0,id]>2*mean /*&& a[0,id]>self.initialMeanElementArea/4*/) sel[2,id]=true 
+        }
+
+        //Show(plotselection(self.mesh, sel, grade=[0,1,2]))
+
+        var mr = MeshRefiner([self.mesh, self.f]) 
+        var dict = mr.refine(selection=sel)
+        self.update(dict)
+
+        equiangulate(self.mesh)
+        // Must recreate the problem and optimizer
+        self.setupProblem()
+        self.setupOptimizer() 
+
+        //Show(plotmesh(self.mesh, grade=[0,1,2]))
+    }
+
+    optimize(nIter) {
+        self.opt.relax(1)
+        self.opt.conjugategradient(nIter)
+    }
+
+    dirac(u) { // Dirac delta
+        if (u>self.alpha || u<-self.alpha) return 0
+        return (1 + cos(Pi*u/self.alpha))/2/self.alpha
+    }
+
+    vis(f, colormap=nil) {
+        var cm = colormap
+        if (isnil(cm)) cm = ViridisMap()
+        var sb = ScaleBar(posn=[self.Lx+0.5,0,0], colormap=cm, textcolor=Black)
+        return plotfield(f, style="interpolate", colormap=cm, scalebar=sb)
+    }
+
+    visField(colormap=nil) { return self.vis(self.f, colormap=colormap) }
+    visShape(colormap=nil) { return self.vis(self.f.op(self.heaviside), colormap=colormap) }
+    visMesh(colormap=nil) { return plotmesh(self.mesh, grade=1) }
+    visDirac(colormap=nil) { return self.vis(self.f.op(self.dirac), colormap=colormap) }
+}
+
+var sim = LevelSetSim() 
+sim.initialMesh() 
+sim.initialField(lambda=3) 
+sim.initialAreaConstraint()
+sim.setupProblem()
+sim.setupOptimizer(steplimit=0.2)
+sim.initialMeanArea()
+
+sim.optimize(100) 
+for (refineLevel in 1..4) {
+    print "===Level ${refineLevel}"
+    sim.refine() 
+    sim.alpha*=2/3
+    sim.optimize(100) 
+    sim.compare() 
+}
+
+//Show(sim.visField()+sim.visMesh())

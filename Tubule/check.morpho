@@ -1,0 +1,108 @@
+import kdtree
+
+class MeshChecker {
+  init(mesh, quiet=false) {
+    self.mesh = mesh 
+    self.sizetol = 1e-4
+    self.quiet=quiet
+  }
+
+  _functionalForGrade(grade) {
+    if (grade==1) return Length
+    if (grade==2) return Area
+    if (grade==3) return Volume
+  }
+
+  countElements() {
+    for (grade in 0...self.mesh.maxgrade()) {
+      print "Grade ${grade}: ${self.mesh.count(grade)} elements"
+    }
+  }
+
+  checkElementDim() {
+    for (grade in 1..self.mesh.maxgrade()) {
+        var conn = self.mesh.connectivitymatrix(0,grade)
+        if (!conn) continue
+
+        var nel = conn.dimensions()[1]
+        for (id in 0...nel) {
+            if (conn.rowindices(id).count()!=grade+1) {
+                Error("MshElDim", "Grade ${grade}, element ${id} has ${conn.rowindices(id).count()} vertices").warning()
+            }
+        }
+    }
+  }
+
+  checkDuplicateVertices() {
+    if (self.mesh.count()==0) return 
+    var x0 = self.mesh.vertexposition(0)
+
+    var tree = KDTree([x0])
+
+    for (id in 1...self.mesh.count()) {
+      var x = self.mesh.vertexposition(id)
+      var nearest = (tree.nearest(x).location - x).norm()
+      if (nearest < self.sizetol) {
+        Error("MshDupVtx", "Duplicate vertex ${id} [${nearest}]").warning()
+      }
+
+      var node = tree.insert(x)
+      node.id = id 
+    }
+  }
+
+  checkDuplicateElements() {
+    for (grade in 1..self.mesh.maxgrade()) {
+        var conn = self.mesh.connectivitymatrix(0,grade)
+        if (!conn) continue
+
+        var dict = {} 
+        var nel = conn.dimensions()[1]
+
+        for (id in 0...nel) {
+            var ind = conn.rowindices(id)
+            ind.sort() 
+            var el = apply(Tuple, ind)
+
+            if (dict.contains(el)) {
+                Error("MshDup","Grade ${grade} id ${id} is a duplicate element of id ${dict[el]}").warning()
+            } else {
+                dict[el]=id
+            }
+        }
+    }
+  }
+
+  checkElementSize() {
+    var dict = {}
+
+    var success=true 
+    for (grade in 1..self.mesh.maxgrade()) {
+      if (self.mesh.count(grade)==0) continue 
+
+      var func = self._functionalForGrade(grade)
+      if (!func) continue
+
+      var sizes = func().integrand(self.mesh) 
+      var glist = []
+
+      for (size, id in sizes) {
+        if (abs(size)<self.sizetol) {
+          success=false 
+          Error("MshZroSz", "Grade ${grade} element ${id} has zero size [${size}]").warning() 
+          glist.append(id)
+        }
+      }
+      dict[grade] = glist 
+    }
+    return dict 
+  }
+
+  check() {
+    if (!self.quiet) print "Checking mesh..."
+    self.checkElementDim()
+    self.checkElementSize()
+    self.checkDuplicateVertices() 
+    self.checkDuplicateElements() 
+  }
+}
